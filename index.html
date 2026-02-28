@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>RavenQuest – Fishing Spots (Offline)</title>
+  <title> Fishing Spots  | Desenvolvido por Silaos (Offline)</title>
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -63,18 +63,29 @@
   </style>
 </head>
 
-<body>
+<<body>
   <div id="sidebar">
-    <h1>🎣 RavenQuest – Fishing Spots</h1>
+    <h1>🎣 RavenQuest – Fishing Spots (Silaos)</h1>
+
     <div class="muted">
-      Clique no mapa para escolher o local, preencha e adicione. Tudo salva offline.
+      <strong>Como usar:</strong>
+      <ol style="margin:6px 0 0; padding-left:18px;">
+        <li><strong>Clique no mapa</strong> para definir a posição do spot.</li>
+        <li>Preencha <strong>Nome</strong>, <strong>Tags</strong> e (opcionalmente) uma <strong>Observação</strong>.</li>
+        <li>Finalize em <strong>Adicionar no último clique</strong>.</li>
+      </ol>
+
+      <div style="margin-top:8px;">
+        <strong>Persistência:</strong> os spots ficam salvos <strong>localmente</strong> (offline) no navegador deste dispositivo.
+        Para <strong>backup</strong> e <strong>transferência</strong> , use <strong>Exportar JSON</strong> e guarde o arquivo.
+      </div>
+
       <div id="status" class="muted" style="margin-top:6px;"></div>
     </div>
 
     <div class="divider"></div>
 
     <div class="row">
-      <!-- Somente Oceano -->
       <select id="filterType" title="Filtrar por tipo">
         <option value="oceano">Oceano</option>
       </select>
@@ -93,7 +104,6 @@
       <div style="font-weight:600; margin-bottom:6px;">Adicionar spot</div>
       <input id="name" placeholder="Nome (ex: Spot perto da ponte)" />
       <div class="row">
-        <!-- Somente Oceano -->
         <select id="type">
           <option value="oceano">Oceano</option>
         </select>
@@ -118,13 +128,13 @@
         return;
       }
 
-      // ========= Helpers =========
+      // Helpers
       function escapeHtml(str){
         return String(str).replace(/[&<>"']/g, (m) => ({
           "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"
         }[m]));
       }
-
+      function normalizeTags(s){ return (s||'').split(',').map(t=>t.trim()).filter(Boolean); }
       function formatDateTime(iso) {
         if (!iso) return '';
         const d = new Date(iso);
@@ -132,23 +142,39 @@
         return d.toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
       }
 
-      // ========= Carrega metadata.json =========
-      async function loadMetadata() {
-        for (const path of ['metadata.json', 'tiles/metadata.json']) {
+      async function fetchJson(path){
+        const r = await fetch(path, { cache: 'no-store' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      }
+
+      async function loadMetadataWithPath(){
+        const candidates = ['tiles/metadata.json', 'tiler/metadata.json', 'metadata.json'];
+        for (const path of candidates){
           try {
-            const r = await fetch(path, { cache: 'no-store' });
-            if (!r.ok) continue;
-            return await r.json();
+            const meta = await fetchJson(path);
+            return { meta, path };
           } catch {}
         }
         return null;
       }
 
-      const meta = await loadMetadata();
-      if (!meta) {
-        statusEl.textContent = 'Não consegui ler metadata.json. Verifique se está ao lado do index.html.';
+      async function exists(url){
+        try {
+          const r = await fetch(url, { cache: 'no-store' });
+          return r.ok;
+        } catch {
+          return false;
+        }
+      }
+
+      const metaWrap = await loadMetadataWithPath();
+      if (!metaWrap){
+        statusEl.textContent = 'Não consegui ler metadata.json. Verifique se existe (root ou dentro de tiles/).';
         return;
       }
+
+      const { meta, path: metaPath } = metaWrap;
 
       const minZoomNative = Number(meta.minzoom);
       const maxZoomNative = Number(meta.maxzoom);
@@ -157,12 +183,35 @@
       const tileSize = tm0?.tile_size?.[0] ? Number(tm0.tile_size[0]) : 256;
 
       const [minX, minY, maxX, maxY] = meta.extent.map(Number);
-      const tileFolder = meta.name || 'tiles';
-      const tileFormat = meta.format || 'png';
-      const tileUrl = `./${tileFolder}/{z}/{x}/{y}.${tileFormat}`;
 
-      // ========= CRS custom: scale = 2^(z - maxZoomNative) =========
-      // Bate com pixel_size do seu metadata: z0=4, z1=2, z2=1
+      const tileFormat = meta.format || 'png';
+
+      const folderFromMetaPath = metaPath.includes('/') ? metaPath.split('/')[0] : null;
+
+      const candidates = [
+        folderFromMetaPath,
+        meta.name,
+        'tiles',
+        'tiler'
+      ].filter(Boolean);
+
+      const uniq = [...new Set(candidates)];
+
+      let tileBase = null;
+      for (const base of uniq){
+        const testUrl = `./${base}/${minZoomNative}/0/0.${tileFormat}`;
+        if (await exists(testUrl)) { tileBase = `./${base}`; break; }
+      }
+
+      if (!tileBase){
+        statusEl.textContent =
+          `Não encontrei tiles em: ${uniq.join(', ')}. Ex: deveria existir ./tiles/0/0/0.${tileFormat}`;
+        return;
+      }
+
+      const tileUrl = `${tileBase}/{z}/{x}/{y}.${tileFormat}`;
+
+      // CRS custom
       const RasterCRS = L.Util.extend({}, L.CRS.Simple, {
         transformation: new L.Transformation(1, 0, -1, 0),
         scale: (zoom) => Math.pow(2, zoom - maxZoomNative),
@@ -174,17 +223,14 @@
         L.latLng(maxY, maxX)
       );
 
-      // ========= Zoom extra (deixa maior/mais usável) =========
       const EXTRA_ZOOM_OUT = 2;
       const EXTRA_ZOOM_IN  = 3;
-
       const minZoom = minZoomNative - EXTRA_ZOOM_OUT;
       const maxZoom = maxZoomNative + EXTRA_ZOOM_IN;
 
       statusEl.textContent =
-        `metadata OK | native zoom ${minZoomNative}-${maxZoomNative} | zoom ${minZoom}-${maxZoom} | tileSize ${tileSize}px | extent ${maxX}×${Math.abs(minY)} | ${tileUrl}`;
+        `OK | meta=${metaPath} | tiles=${tileBase}/z/x/y.${tileFormat} | native ${minZoomNative}-${maxZoomNative} | zoom ${minZoom}-${maxZoom} | tileSize ${tileSize}px | extent ${maxX}×${Math.abs(minY)}`;
 
-      // ========= MAPA =========
       const map = L.map('map', {
         crs: RasterCRS,
         minZoom,
@@ -193,11 +239,13 @@
         maxBoundsViscosity: 1.0
       });
 
+      // ✅ REMOVER "Leaflet |" (prefixo do Leaflet)
+      map.attributionControl.setPrefix('');
+
       const layer = L.tileLayer(tileUrl, {
         tileSize,
         bounds,
         noWrap: true,
-        // overzoom/underzoom sem pedir z inexistente
         minZoom,
         maxZoom,
         minNativeZoom: minZoomNative,
@@ -208,10 +256,10 @@
 
       layer.on('tileerror', (ev) => console.error('Tile 404:', ev.tile?.src));
 
-      map.fitBounds(bounds);
+      map.fitBounds(bounds, { padding: [20, 20] });
       map.setMaxBounds(bounds);
 
-      // ========= Ícone preview (pino hi-vis) =========
+      // Preview pin
       const hiVisPinIcon = L.divIcon({
         className: 'pin-icon',
         iconSize: [36, 36],
@@ -233,13 +281,9 @@
       `;
       document.head.appendChild(pinStyle);
 
-      // ========= SPOTS =========
-      const STORAGE_KEY = 'rq_fishing_spots_tiles_v1';
-
-      let spots = loadSpots();
-
-      // Força tudo como oceano (inclui spots antigos/importados)
-      spots = spots.map(s => ({ ...s, type: 'oceano' }));
+      // Storage separado por mapa/pasta
+      const STORAGE_KEY = `rq_fishing_spots_${tileBase.replace('./','')}_${maxX}x${Math.abs(minY)}_z${maxZoomNative}`;
+      let spots = loadSpots().map(s => ({ ...s, type: 'oceano' }));
       saveSpots();
 
       let markers = [];
@@ -248,13 +292,10 @@
 
       function saveSpots(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(spots)); }
       function loadSpots(){ try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch { return []; } }
-      function normalizeTags(s){ return (s||'').split(',').map(t=>t.trim()).filter(Boolean); }
 
       function matchesFilter(spot){
-        // só oceano agora
         const q = (document.getElementById('search').value || '').trim().toLowerCase();
         if (!q) return true;
-
         const hay = [spot.name, spot.note || '', ...(spot.tags || [])].join(' ').toLowerCase();
         return hay.includes(q);
       }
@@ -264,12 +305,10 @@
           ? `<div><b>Tags:</b> ${spot.tags.map(escapeHtml).join(', ')}</div>`
           : ''
         );
-
         const note = (spot.note
           ? `<div style="margin-top:6px; color:#9aa0a6; white-space:pre-wrap;">${escapeHtml(spot.note)}</div>`
           : ''
         );
-
         const created = (spot.createdAt
           ? `<div><b>Adicionado em:</b> ${escapeHtml(formatDateTime(spot.createdAt))}</div>`
           : ''
@@ -294,7 +333,7 @@
         const visible = spots.filter(matchesFilter);
 
         visible.forEach((spot) => {
-          // ✅ Spots salvos = ponto amarelo pequeno
+          // spots salvos = ponto amarelo pequeno
           const marker = L.circleMarker([spot.y, spot.x], {
             radius: 5,
             color: '#000',
@@ -410,7 +449,6 @@
 
         if (preview) map.removeLayer(preview);
 
-        // Preview = pino hi-vis
         preview = L.marker([lastClick.y, lastClick.x], {
           icon: hiVisPinIcon,
           interactive: false
@@ -420,7 +458,6 @@
           `Selecionado: x=${lastClick.x.toFixed(1)}, y=${lastClick.y.toFixed(1)}`;
       });
 
-      // Import/export
       function downloadJson(filename, obj) {
         const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);

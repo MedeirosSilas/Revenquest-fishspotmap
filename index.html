@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>RavenQuest – Fishing Spots (Offline)</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    :root{
+      --bg:#0f0f10; --panel:#171717; --panel2:#141414; --line:#2a2a2a;
+      --muted:#9aa0a6; --accent:#2b5cff; --danger:#b3261e;
+    }
+    *{ box-sizing:border-box; }
+    body{
+      margin:0; height:100vh; display:flex; background:var(--bg); color:#fff;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    }
+    #sidebar{
+      width:380px; min-width:320px; max-width:520px;
+      background:var(--panel); border-right:1px solid var(--line);
+      padding:12px; overflow:auto;
+    }
+    #map{ flex:1; background:#0b0b0c; }
+
+    h1{ font-size:16px; margin:0 0 6px; }
+    .muted{ color:var(--muted); font-size:12px; line-height:1.4; }
+    .divider{ height:1px; background:var(--line); margin:10px 0; }
+
+    input, select, textarea, button{
+      width:100%;
+      border:1px solid var(--line);
+      background:#0f0f10;
+      color:#fff;
+      border-radius:10px;
+      padding:9px 10px;
+      margin:6px 0;
+      outline:none;
+    }
+    textarea{ min-height:72px; resize:vertical; }
+
+    .row{ display:flex; gap:8px; }
+    .row > *{ flex:1; }
+
+    button{ cursor:pointer; background:#202020; }
+    button.primary{ background:var(--accent); border-color:var(--accent); }
+    button.danger{ background:var(--danger); border-color:var(--danger); }
+    button.ghost{ background:transparent; }
+
+    .card{ border:1px solid var(--line); background:var(--panel2); border-radius:14px; padding:10px; }
+    .hint{ font-size:12px; color:var(--muted); margin-top:6px; }
+
+    .spot{ border:1px solid var(--line); background:#121212; border-radius:14px; padding:10px; margin:8px 0; }
+    .spot .title{ font-weight:600; display:flex; align-items:center; justify-content:space-between; gap:8px; }
+    .pill{ font-size:11px; padding:2px 8px; border-radius:999px; border:1px solid var(--line); color:var(--muted); white-space:nowrap; }
+    .spot .note{ color:var(--muted); font-size:12px; margin-top:6px; white-space:pre-wrap; }
+    .spot .actions{ display:flex; gap:8px; margin-top:10px; }
+    .spot .actions button{ padding:7px 8px; border-radius:10px; margin:0; }
+
+    .leaflet-tile { image-rendering: pixelated; image-rendering: crisp-edges; }
+  </style>
+</head>
+
+<body>
+  <div id="sidebar">
+    <h1>🎣 RavenQuest – Fishing Spots</h1>
+    <div class="muted">
+      Clique no mapa para escolher o local, preencha e adicione. Tudo salva offline.
+      <div id="status" class="muted" style="margin-top:6px;"></div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="row">
+      <!-- Somente Oceano -->
+      <select id="filterType" title="Filtrar por tipo">
+        <option value="oceano">Oceano</option>
+      </select>
+      <input id="search" placeholder="Buscar (nome/nota/tag)..." />
+    </div>
+
+    <div class="row">
+      <button class="ghost" id="exportBtn" type="button">Exportar JSON</button>
+      <button class="ghost" id="importBtn" type="button">Importar JSON</button>
+      <input type="file" id="importFile" style="display:none" accept=".json,application/json" />
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="card">
+      <div style="font-weight:600; margin-bottom:6px;">Adicionar spot</div>
+      <input id="name" placeholder="Nome (ex: Spot perto da ponte)" />
+      <div class="row">
+        <!-- Somente Oceano -->
+        <select id="type">
+          <option value="oceano">Oceano</option>
+        </select>
+        <input id="tags" placeholder="Tags (ex: peixeX,noite,iscaY)" />
+      </div>
+      <textarea id="note" placeholder="Observação (opcional)"></textarea>
+      <button class="primary" id="addBtn" type="button">Adicionar no último clique</button>
+      <div class="hint" id="clickHint">Dica: clique no mapa para selecionar um ponto.</div>
+    </div>
+
+    <div class="divider"></div>
+    <div id="spotList"></div>
+  </div>
+
+  <div id="map"></div>
+
+  <script>
+    window.addEventListener('DOMContentLoaded', async () => {
+      const statusEl = document.getElementById('status');
+      if (!window.L) {
+        statusEl.textContent = 'Leaflet não carregou.';
+        return;
+      }
+
+      // ========= Helpers =========
+      function escapeHtml(str){
+        return String(str).replace(/[&<>"']/g, (m) => ({
+          "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"
+        }[m]));
+      }
+
+      function formatDateTime(iso) {
+        if (!iso) return '';
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return String(iso);
+        return d.toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
+      }
+
+      // ========= Carrega metadata.json =========
+      async function loadMetadata() {
+        for (const path of ['metadata.json', 'tiles/metadata.json']) {
+          try {
+            const r = await fetch(path, { cache: 'no-store' });
+            if (!r.ok) continue;
+            return await r.json();
+          } catch {}
+        }
+        return null;
+      }
+
+      const meta = await loadMetadata();
+      if (!meta) {
+        statusEl.textContent = 'Não consegui ler metadata.json. Verifique se está ao lado do index.html.';
+        return;
+      }
+
+      const minZoomNative = Number(meta.minzoom);
+      const maxZoomNative = Number(meta.maxzoom);
+
+      const tm0 = meta.tile_matrix?.[0];
+      const tileSize = tm0?.tile_size?.[0] ? Number(tm0.tile_size[0]) : 256;
+
+      const [minX, minY, maxX, maxY] = meta.extent.map(Number);
+      const tileFolder = meta.name || 'tiles';
+      const tileFormat = meta.format || 'png';
+      const tileUrl = `./${tileFolder}/{z}/{x}/{y}.${tileFormat}`;
+
+      // ========= CRS custom: scale = 2^(z - maxZoomNative) =========
+      // Bate com pixel_size do seu metadata: z0=4, z1=2, z2=1
+      const RasterCRS = L.Util.extend({}, L.CRS.Simple, {
+        transformation: new L.Transformation(1, 0, -1, 0),
+        scale: (zoom) => Math.pow(2, zoom - maxZoomNative),
+        zoom: (scale) => Math.log(scale) / Math.LN2 + maxZoomNative
+      });
+
+      const bounds = L.latLngBounds(
+        L.latLng(minY, minX),
+        L.latLng(maxY, maxX)
+      );
+
+      // ========= Zoom extra (deixa maior/mais usável) =========
+      const EXTRA_ZOOM_OUT = 2;
+      const EXTRA_ZOOM_IN  = 3;
+
+      const minZoom = minZoomNative - EXTRA_ZOOM_OUT;
+      const maxZoom = maxZoomNative + EXTRA_ZOOM_IN;
+
+      statusEl.textContent =
+        `metadata OK | native zoom ${minZoomNative}-${maxZoomNative} | zoom ${minZoom}-${maxZoom} | tileSize ${tileSize}px | extent ${maxX}×${Math.abs(minY)} | ${tileUrl}`;
+
+      // ========= MAPA =========
+      const map = L.map('map', {
+        crs: RasterCRS,
+        minZoom,
+        maxZoom,
+        zoomControl: true,
+        maxBoundsViscosity: 1.0
+      });
+
+      const layer = L.tileLayer(tileUrl, {
+        tileSize,
+        bounds,
+        noWrap: true,
+        // overzoom/underzoom sem pedir z inexistente
+        minZoom,
+        maxZoom,
+        minNativeZoom: minZoomNative,
+        maxNativeZoom: maxZoomNative,
+        tms: false,
+        attribution: meta.attribution || ''
+      }).addTo(map);
+
+      layer.on('tileerror', (ev) => console.error('Tile 404:', ev.tile?.src));
+
+      map.fitBounds(bounds);
+      map.setMaxBounds(bounds);
+
+      // ========= Ícone preview (pino hi-vis) =========
+      const hiVisPinIcon = L.divIcon({
+        className: 'pin-icon',
+        iconSize: [36, 36],
+        iconAnchor: [18, 36],
+        popupAnchor: [0, -36],
+        html: `
+          <svg width="36" height="36" viewBox="0 0 24 24" aria-hidden="true">
+            <path fill="#000" d="M12 1.7c-4.2 0-7.6 3.4-7.6 7.6C4.4 15 12 22.7 12 22.7S19.6 15 19.6 9.3c0-4.2-3.4-7.6-7.6-7.6z"/>
+            <path fill="#ffd400" d="M12 2.8c-3.6 0-6.5 2.9-6.5 6.5C5.5 13.9 12 20.7 12 20.7s6.5-6.8 6.5-11.4c0-3.6-2.9-6.5-6.5-6.5z"/>
+            <circle cx="12" cy="9.3" r="2.6" fill="#111"/>
+          </svg>
+        `
+      });
+
+      const pinStyle = document.createElement('style');
+      pinStyle.textContent = `
+        .pin-icon { background: transparent; border: none; }
+        .pin-icon svg { display:block; filter: drop-shadow(0 2px 2px rgba(0,0,0,.45)); }
+      `;
+      document.head.appendChild(pinStyle);
+
+      // ========= SPOTS =========
+      const STORAGE_KEY = 'rq_fishing_spots_tiles_v1';
+
+      let spots = loadSpots();
+
+      // Força tudo como oceano (inclui spots antigos/importados)
+      spots = spots.map(s => ({ ...s, type: 'oceano' }));
+      saveSpots();
+
+      let markers = [];
+      let lastClick = null;
+      let preview = null;
+
+      function saveSpots(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(spots)); }
+      function loadSpots(){ try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch { return []; } }
+      function normalizeTags(s){ return (s||'').split(',').map(t=>t.trim()).filter(Boolean); }
+
+      function matchesFilter(spot){
+        // só oceano agora
+        const q = (document.getElementById('search').value || '').trim().toLowerCase();
+        if (!q) return true;
+
+        const hay = [spot.name, spot.note || '', ...(spot.tags || [])].join(' ').toLowerCase();
+        return hay.includes(q);
+      }
+
+      function popupHtml(spot){
+        const tags = (spot.tags?.length
+          ? `<div><b>Tags:</b> ${spot.tags.map(escapeHtml).join(', ')}</div>`
+          : ''
+        );
+
+        const note = (spot.note
+          ? `<div style="margin-top:6px; color:#9aa0a6; white-space:pre-wrap;">${escapeHtml(spot.note)}</div>`
+          : ''
+        );
+
+        const created = (spot.createdAt
+          ? `<div><b>Adicionado em:</b> ${escapeHtml(formatDateTime(spot.createdAt))}</div>`
+          : ''
+        );
+
+        return `
+          <b>${escapeHtml(spot.name)}</b>
+          <div><b>Tipo:</b> oceano</div>
+          ${created}
+          ${tags}
+          ${note}
+        `;
+      }
+
+      function render(){
+        markers.forEach(m => map.removeLayer(m));
+        markers = [];
+
+        const list = document.getElementById('spotList');
+        list.innerHTML = '';
+
+        const visible = spots.filter(matchesFilter);
+
+        visible.forEach((spot) => {
+          // ✅ Spots salvos = ponto amarelo pequeno
+          const marker = L.circleMarker([spot.y, spot.x], {
+            radius: 5,
+            color: '#000',
+            weight: 2,
+            fillColor: '#ffd400',
+            fillOpacity: 0.95
+          }).addTo(map).bindPopup(popupHtml(spot));
+
+          markers.push(marker);
+
+          const div = document.createElement('div');
+          div.className = 'spot';
+          div.innerHTML = `
+            <div class="title">
+              <span>${escapeHtml(spot.name)}</span>
+              <span class="pill">oceano</span>
+            </div>
+            ${spot.createdAt ? `<div class="muted">Adicionado em: ${escapeHtml(formatDateTime(spot.createdAt))}</div>` : ``}
+            ${spot.tags?.length ? `<div class="muted">tags: ${spot.tags.map(escapeHtml).join(', ')}</div>` : ``}
+            ${spot.note ? `<div class="note">${escapeHtml(spot.note)}</div>` : ``}
+            <div class="actions">
+              <button type="button" onclick="focusSpot('${spot.id}')">Ir</button>
+              <button type="button" onclick="editSpot('${spot.id}')">Editar</button>
+              <button type="button" class="danger" onclick="deleteSpot('${spot.id}')">Remover</button>
+            </div>
+          `;
+          list.appendChild(div);
+        });
+
+        if (visible.length === 0){
+          list.innerHTML = `<div class="muted">Nenhum spot encontrado.</div>`;
+        }
+      }
+
+      function focusSpot(id){
+        const s = spots.find(x => x.id === id);
+        if (!s) return;
+        map.setView([s.y, s.x], Math.min(maxZoom, maxZoomNative + 2), { animate:true });
+      }
+
+      function editSpot(id){
+        const s = spots.find(x => x.id === id);
+        if (!s) return;
+
+        const name = prompt('Nome:', s.name);
+        if (name === null) return;
+
+        const tags = prompt('Tags:', (s.tags || []).join(','));
+        if (tags === null) return;
+
+        const note = prompt('Observação:', s.note || '');
+        if (note === null) return;
+
+        s.name = name.trim() || s.name;
+        s.type = 'oceano';
+        s.tags = normalizeTags(tags);
+        s.note = note;
+
+        saveSpots();
+        render();
+      }
+
+      function deleteSpot(id){
+        if (!confirm('Remover esse spot?')) return;
+        spots = spots.filter(x => x.id !== id);
+        saveSpots();
+        render();
+      }
+
+      function clearForm(){
+        document.getElementById('name').value = '';
+        document.getElementById('tags').value = '';
+        document.getElementById('note').value = '';
+      }
+
+      function addSpotFromForm(){
+        if (!lastClick){
+          alert('Clique no mapa primeiro.');
+          return;
+        }
+
+        const name = document.getElementById('name').value.trim();
+        const type = 'oceano';
+        const tags = normalizeTags(document.getElementById('tags').value);
+        const note = document.getElementById('note').value.trim();
+
+        if (!name){
+          alert('Digite um nome.');
+          return;
+        }
+
+        const id = crypto.randomUUID ? crypto.randomUUID() :
+          String(Date.now()) + Math.random().toString(16).slice(2);
+
+        spots.push({
+          id,
+          name,
+          type,
+          tags,
+          note,
+          x: lastClick.x,
+          y: lastClick.y,
+          createdAt: new Date().toISOString()
+        });
+
+        saveSpots();
+        clearForm();
+        render();
+      }
+
+      map.on('click', (e) => {
+        lastClick = { x: e.latlng.lng, y: e.latlng.lat };
+
+        if (preview) map.removeLayer(preview);
+
+        // Preview = pino hi-vis
+        preview = L.marker([lastClick.y, lastClick.x], {
+          icon: hiVisPinIcon,
+          interactive: false
+        }).addTo(map);
+
+        document.getElementById('clickHint').textContent =
+          `Selecionado: x=${lastClick.x.toFixed(1)}, y=${lastClick.y.toFixed(1)}`;
+      });
+
+      // Import/export
+      function downloadJson(filename, obj) {
+        const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      }
+
+      document.getElementById('exportBtn').addEventListener('click', () => {
+        downloadJson('ravenquest-fishing-spots.json', { version: 1, spots });
+      });
+
+      document.getElementById('importBtn').addEventListener('click', () => {
+        document.getElementById('importFile').click();
+      });
+
+      document.getElementById('importFile').addEventListener('change', async (ev) => {
+        const file = ev.target.files?.[0];
+        ev.target.value = '';
+        if (!file) return;
+
+        try {
+          const data = JSON.parse(await file.text());
+          const imported = Array.isArray(data) ? data : (data?.spots || []);
+          if (!Array.isArray(imported)) throw new Error('Formato inválido');
+
+          const cleaned = imported.map(s => ({
+            id: String(s.id || (crypto.randomUUID ? crypto.randomUUID() : Date.now() + Math.random())),
+            name: String(s.name || 'Sem nome'),
+            type: 'oceano',
+            tags: Array.isArray(s.tags) ? s.tags.map(String) : normalizeTags(String(s.tags || '')),
+            note: s.note ? String(s.note) : '',
+            x: Number(s.x),
+            y: Number(s.y),
+            createdAt: s.createdAt ? String(s.createdAt) : new Date().toISOString()
+          })).filter(s => Number.isFinite(s.x) && Number.isFinite(s.y));
+
+          if (!confirm(`Importar ${cleaned.length} spots? Isso vai SUBSTITUIR os atuais.`)) return;
+
+          spots = cleaned.map(s => ({ ...s, type: 'oceano' }));
+          saveSpots();
+          render();
+          alert('Importação concluída.');
+        } catch (e) {
+          console.error(e);
+          alert('Falha ao importar JSON.');
+        }
+      });
+
+      document.getElementById('search').addEventListener('input', render);
+      document.getElementById('addBtn').addEventListener('click', addSpotFromForm);
+
+      window.focusSpot = focusSpot;
+      window.editSpot = editSpot;
+      window.deleteSpot = deleteSpot;
+
+      render();
+    });
+  </script>
+</body>
+</html>
